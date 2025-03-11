@@ -165,6 +165,28 @@ Halt               # Stop execution
     - [SOURCE](https://www.ibm.com/docs/en/zos/3.1.0?topic=functions-getline-read-entire-line-from-stream)
     - Meaning I should replace the newline character with the terminating null byte to have a clean string (input).
 
+##### Enum (Enumerations) 
+- An enum is a data type that represents a group of constants, with unchangeable values. 
+- Syntax:
+```c
+enum Week {
+    MONDAY,
+    TUESDAY,
+    WEDNESDAY,
+    THURSDAY,
+    FRIDAY,
+    SATURDAY,
+    SUNDAY
+};
+```
+- Similar to `struct` data types, to declare an `enum` variable in `main()`:
+```c
+enum Week today;
+```   
+- And assign a value to it, the value should be one the items inside the `enum`:
+```c
+enum Week today = SUNDAY;
+```
 
 ## My process
 
@@ -204,7 +226,7 @@ int main() {
 ``` 
 - Then, I changed the process to be more dynamic, hence using pointers and following memory management techniques. 
 - I initialized a wrapper around the user input, to make working with it efficient. I declared three variables: 
-    - `buffer`: which is the actual input entered by the user
+    - `buffer`: which is the actual input entered by the user.
     - `buffer_length`: this is what stores the size of the allocated memory. 
     - `input_length`: this represents how many characters the user has entered.
 
@@ -215,7 +237,7 @@ typedef struct {
     ssize_t input_length;
 } InputBuffer;
 ``` 
-- I built another function, `new_input_buffer()`, which initializes an instance of the buffer, returning a pointer to it. 
+- I built another function, `new_input_buffer()`, which initializes an instance of the InputBuffer, returning a pointer to it. 
 
 ```c
 InputBuffer* new_input_buffer() {
@@ -250,7 +272,7 @@ void read_input(InputBuffer* input_buffer) {
 ```
 - This line: `size_t bytes_read = getline(&(input_buffer->buffer), &(input_buffer->buffer_length), stdin);`:
     - Takes the user's input
-    - Stores it in `input_buffer->buffer` (which is an instance of the `InputBuffer` struct)
+    - Stores it in `input_buffer->buffer` (`input_buffer` is an instance of the `InputBuffer` struct)
     - Stores how much memory was allocated for the buffer in bytes in `input_buffer->buffer_length`
     - Removes the newline character, `input_buffer->buffer[bytes_read - 1] = 0`
     - Returns how many characters the user has entered, which I then stored in `input_buffer->input_length` (`input_buffer->input_length = bytes_read - 1`)
@@ -319,6 +341,150 @@ void read_input(InputBuffer* input_buffer) {
 }
 ```
 - Now, the code works as expected.
+
+- What are meta-commands?
+    - Meta-commands are non-SQL statement, they start with a dot '.'
+    - Following the GitHub repository, I found that it was better if I handled those commands in a separate function
+
+```c
+typedef enum {
+    META_COMMAND_SUCCESS,
+    META_COMMAND_UNRECOGNIZED_COMMAND,
+} MetaCommand;
+```
+```c
+MetaCommand meta_command(InputBuffer* input_buffer) {
+    if (strcmp(input_buffer->buffer, ".exit")) {
+        exit(EXIT_SUCCESS);
+    } else {
+        return META_COMMAND_UNRECOGNIZED_COMMAND;
+    }
+}
+```
+- the `meta_command` function handles meta-commands. Initially, it just handles the "exit" command, I will probably add more commands later on. 
+- Updated `main()` function:
+```c
+int main(int argc, char* argv[]) {
+    InputBuffer* input_buffer = new_input_buffer();
+    while (1) {
+        printf("db > ");
+        read_input(input_buffer);
+
+        if (input_buffer->buffer[0] == '.') {
+            switch (meta_command(input_buffer))
+            {
+                case (META_COMMAND_SUCCESS):
+                    continue;
+                case (META_COMMAND_UNRECOGNIZED_COMMAND):
+                    printf("Unrecognized Command: %s\n", input_buffer->buffer);
+                    continue; 
+            }
+        }
+    }
+    return 0;
+}
+```
+
+- Next, I need to handle SQL commands, or statements. By converting the command into the internal representaton of a statement. Using an `enum` to achieve that. Since `enum` gives us constant values, I can make use of that.
+```c
+typedef enum {
+    STATEMENT_SELECT,
+    STATEMENT_INSERT
+} StatementType;
+```
+
+- Also, I need a way to check if the statement is "prepared", meaning it is converted into the internal representation. For that, another `enum` is useful. 
+```c
+typedef enum {
+    PREPARE_SUCCESS,
+    PREPARE_UNRECOGNIZED_STATEMENT
+} PrepareResult;
+```
+
+- Lastly, I will make use of `struct` to capture the statement entered by the user:
+```c
+typedef struct {
+    StatementType type;
+} Statement;
+```
+
+- Now, I'll write a `prepare_statement()` function to "prepare", or convert the statement the user entered into the internal representation of a SQL command:
+```c
+PrepareResult prepare_statement (InputBuffer* input_buffer, Statement* statement) {
+    if (strncmp(input_buffer->buffer, "insert", 6) == 0) {
+        statement->type = STATEMENT_INSERT;
+        return PREPARE_SUCCESS;
+    }
+    if (strcmp(input_buffer->buffer, "select") == 0) {
+        statement->type = STATEMENT_SELECT;
+        return PREPARE_SUCCESS;
+    }
+
+    return PREPARE_UNRECOGNIZED_STATEMENT;
+}
+```
+
+- Next comes our `execute_command()` function, which only needs the statement type in order to execute code:
+```c
+void execute_command(Statement* statement) {
+    switch (statement->type) {
+        case (STATEMENT_INSERT) 
+            printf("This is where insert code goes...\n");
+            break;
+        case (STATEMENT_SELECT) {
+            printf("This is where select code goes...\n");
+            break;
+        }
+    }
+}
+```
+
+- Updated `main()` function:
+```c
+int main(int argc, char* argv[]) {
+    InputBuffer* input_buffer = new_input_buffer();
+    while (1) {
+        printf("db > ");
+        read_input(input_buffer);
+
+        if (input_buffer->buffer[0] == '.') {
+            switch (meta_command(input_buffer))
+            {
+                case (META_COMMAND_SUCCESS):
+                    continue;
+                case (META_COMMAND_UNRECOGNIZED_COMMAND):
+                    printf("Unrecognized Command: %s\n", input_buffer->buffer);
+                    continue; 
+            }
+        }
+
+        Statement statement;
+        switch (prepare_statement(input_buffer, &statement)) {
+            case (PREPARE_SUCCESS):
+                break;
+            case (PREPARE_UNRECOGNIZED_COMMAND):
+                printf("Unrecognized keyword at start of '%s'.\n", input_buffer->buffer);
+                continue;
+        }
+        execute_command(&statement);
+        printf("Executed.\n");
+    }
+
+    return 0;
+}
+```
+
+- To summarize what I did in this part:
+    - After building the REPL, our interface is now ready to take commands.
+    - There are two types of commands: SQL commands and Non-SQL commands (or meta-commands).
+    - The point of meta-commands is for the user to interact with the program in order to exit the REPL for example.
+    - We made use of `enum` data types so we could have a clear language to handle cases efficiently. 
+    - The `enum` data types I used above were: `MetaCommand`, `PrepareResult`, and `StatementType`. Where:
+        - `MetaCommand`: Provides a clear language as to whether the command that has been entered by the user is valid (recognized). It has two values: `META_COMMAND_SUCCESS` and `META_COMMAND_UNRECOGNIZED_COMMAND`. It works with `meta_command()` function.
+        - `PrepareResult`: Our SQL statement needs to be prepared (compiled, or converted to its internal representation) in order to be executed. To achieve this, I used `enum` data type as a way to check if preparing the statement has been successful. It has two values as well: `PREPARE_SUCCESS` and `PREPARE_UNRECOGNIZED_COMMAND`. It works with `prepare_statement()` function.
+        - `StatementType`: The language to which the SQL statement needs to be converted, is simply managed by this `enum` data type. For now, the SQL statement is converted to either `STATEMENT_INSERT` or `STATEMENT_SELECT`, which will then be used to execute the corresponding code.
+    - I stored the converted SQL statement in a `struct` data type instance. `Statement` which has a `type` variable of a `StatementType` type. So we can see now that there isn't any actual "conversion," we just store the type of SQL command (`SELECT` or `INSERT` for now) in a variable (`type`) based on user's input.
+    - I then created the `execute_command()` function which, based on `type` (`SELECT` or `INSERT`), will execute code.
 
 ## 📚 References  
 - ["Build Your Own X"](https://github.com/danistefanovic/build-your-own-x) 
