@@ -162,9 +162,15 @@ Halt               # Stop execution
         FILE *stream -> Input source (e.g., stdin for user input). 
         ``` 
     - `getline()` returns the number of characters that are read in bytes, including the newline character, but not including the terminating null byte ('\0')
-    - [SOURCE](https://www.ibm.com/docs/en/zos/3.1.0?topic=functions-getline-read-entire-line-from-stream)
     - Meaning I should replace the newline character with the terminating null byte to have a clean string (input).
+    - [SOURCE](https://www.ibm.com/docs/en/zos/3.1.0?topic=functions-getline-read-entire-line-from-stream)
 
+- `sscanf()`: reads data from _buffer_ into the locations that are given by the third argument (called argument list). Each _argument_ must be a pointer to a variable that corresponds to the type specifier in the _format-string_. It returns the number of fields that were successfully converted and assigned.
+    format:
+    ```c
+        int sscanf(const char *buffer, const char *format, argument-list);
+    ```
+    - [SOURCE](https://www.ibm.com/docs/en/i/7.3?topic=functions-sscanf-read-data)
 ##### Enum (Enumerations) 
 - An enum is a data type that represents a group of constants, with unchangeable values. 
 - Syntax:
@@ -187,6 +193,9 @@ enum Week today;
 ```c
 enum Week today = SUNDAY;
 ```
+##### Macros
+- A macro in C is a symbolic name or constant that represents a value, expression, or code snippet. They are are defined using the `#define` directive, and when encountered, the preprocessor substitutes it with its defined content.
+- [SOURCE](https://www.geeksforgeeks.org/macros-and-its-types-in-c-cpp/)
 
 ## My process
 
@@ -385,7 +394,7 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-- Next, I need to handle SQL commands, or statements. By converting the command into the internal representaton of a statement. Using an `enum` to achieve that. Since `enum` gives us constant values, I can make use of that.
+- Next, I need to handle SQL commands, or statements. By converting the command into the internal representation of a statement. Using an `enum` to achieve that. Since `enum` gives us constant values, I can make use of that.
 ```c
 typedef enum {
     STATEMENT_SELECT,
@@ -486,8 +495,144 @@ int main(int argc, char* argv[]) {
     - I stored the converted SQL statement in a `struct` data type instance. `Statement` which has a `type` variable of a `StatementType` type. So we can see now that there isn't any actual "conversion," we just store the type of SQL command (`SELECT` or `INSERT` for now) in a variable (`type`) based on user's input.
     - I then created the `execute_command()` function which, based on `type` (`SELECT` or `INSERT`), will execute code.
 
+- Following along with the GitHub repository, we're going to be working with hard-coded table, meaning:
+    - The table's structure (columns, data types, etc.) is predefined in the code. 
+    - Unlike real databases where we can define multiple tables (e.g, `users`, `orders`, `products`), this database will only have one table that's hardwired into the code.
+    - In real databases, we can define column names, types, etc., but for our database, the table's structure is manually written into the program.
+
+- Our table's structure is as follows:
+
+| Column   | Type          |
+|----------|--------------|
+| id       | integer      |
+| username | varchar(32)  |
+| email    | varchar(255) |
+
+- It stores users by their id, username, and email.
+- We need a row structure to store these information:
+```c
+#define COLUMN_USERNAME_SIZE 32
+#define COLUMN_EMAIL_SIZE 255
+typedef struct {
+    uint32_t id;
+    char username[COLUMN_USERNAME_SIZE];
+    char email[COLUMN_EMAIL_SIZE];
+} Row;
+```
+
+- We already have an `insert` functionality (in `prepare_statement()` function), but it doesn't work as needed. So I'm going to modify it to actually insert the user's information into a Row struct instance:
+```c
+PrepareResult prepare_statement(InputBuffer* input_buffer, Statement* statement) {
+    if (strncmp(input_buffer->buffer, "insert", 6) == 0) {
+        statement->type = STATEMENT_INSERT;
+        int args_assigned = sscanf(
+            input_buffer->buffer, "insert %d %s %s", &(statement->row_to_insert.id),
+            statement->row_to_insert.username, statement->row_to_insert.email;)
+        if (args_assigned < 3) {
+            return PREPARE_SYNTAX_ERROR;
+        } 
+        return PREPARE_SUCCESS;
+    }
+...
+}
+```
+- `row_to_insert` is actually a Row data structure inside the statement object that stores the values of `id`, `username`, and `email`:
+```c
+typedef struct {
+   StatementType type;
+   Row row_to_insert;
+} Statement;
+```
+
+- Also, I updated the `PrepareResult` enum to include `PREPARE_SYNTAX_ERROR`:
+```c
+typedef enum {
+    PREPARE_SUCCESS,
+    PREPARE_UNRECOGNIZED_COMMAND,
+    PREPARE_SYNTAX_ERROR
+} PrepareResult;
+```
+
+- Now, a single row in the database corresponds to an instance of the `Row` struct (meaning a single row holds `id`, `username`, and `email`).
+- I'll be storing rows in "pages" in memory. A "page" here is simply a block of memory. And each page should store as many rows as it can fit. 
+- The number of rows a page can store depends on the size of each row. 
+- Example: 
+    - let's assume a `Row` takes 300 bytes (`4 (id) + 32 (username) + 255 (email) + padding`).
+    - A page size is 4 KB (4096 bytes).
+    - Then a page can store: 
+        4096 / 300 = 13 rows per page
+    
+    - Once a page is full, a new page is allocated.
+
+- Rows must be serialized into a compact representation, meaning we need to convert the `Row` struct instance into a **linear sequence of bytes** so that it can be efficiently stored in a contiguous memory block (a page).
+- Instead of storing rows in memory as individual objects with padding (which wastes space), each row is packed tightly into a page using explicit offsets.
+
+```c
+#define size_of_attribute(Struct, Attribute) sizeof(((Struct*)0)->Attribute)
+```
+- This macro calculates the size of a specific attribute inside a struct without requiring an actual instance.
+- Breakdown:
+    - **(Struct*)0**: 
+        - This creates a null pointer to Struct.
+        - We don’t allocate memory for an actual struct instance, we just pretend it exists at memory address 0.
+
+    - **((Struct*)0)->Attribute**:
+        - This accesses the `Attribute` as if `Struct` was real.
+        - No actual memory access happens because `sizeof` only needs to know how much space the attribute would take, not its actual value.
+    
+    - **sizeof(((Struct*)0)->Attribute)**:
+        - This calculates the size of the attribute just like `sizeof(Attribute)` would, but without needing an actual struct instance.
+
+- So this macro gets the size of a struct’s attribute without creating an instance by pretending the struct exists at memory address 0. It's a memory-efficient and safe way to determine field sizes.
+
+```c
+const uint32_t ID_SIZE = size_of_attribute(Row, id);
+const uint32_t USERNAME_SIZE = size_of_attribute(Row, username);
+const uint32_t EMAIL_SIZE = size_of_attribute(Row, email);
+
+const uint32_t ID_OFFSET = 0;
+const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
+const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
+
+const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+```
+
+- `ID_SIZE`, `USERNAME_SIZE`, and `EMAIL_SIZE` store the size of `id`, `username`, and `email` respectively. 
+- Offsets, on the other hand, determine where each field starts in memory (packing). 
+
+| Field    | Offset | Size |
+|----------|--------|------|
+| id       | 0      | 4    |
+| username | 4      | 32   |
+| email    | 36     | 255  |
+
+- And finally, `Row_Size` stores the total size of a single row.
+- This method eliminates padding and fragmentation, ensuring that each row is stored sequentially inside a page. If a page is 4 KB (4096 bytes), it can hold 14 rows (dividing 4096 over `Row_Size` which is 291). 
+
+- I faced an issue regarding size addition:
+```c
+const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
+const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
+const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+```
+- After looking up the problem, I found that the error occurred because `ID_SIZE`, `USERNAME_SIZE`, and `EMAIL_SIZE` are defined using `size_of_attribute`, which relies on `sizeof(((Struct*)0)->Attribute)` and some compilers may not treat `size_of_attribute(Row, id)` as a constant expression when used in a `const` uint32_t declaration.
+- So to fix this, I changed the code to:
+```c
+#define ID_SIZE (size_of_attribute(Row, id))
+#define USERNAME_SIZE (size_of_attribute(Row, username))
+#define EMAIL_SIZE (size_of_attribute(Row, email))
+
+#define ID_OFFSET 0
+#define USERNAME_OFFSET (ID_OFFSET + ID_SIZE)
+#define EMAIL_OFFSET (USERNAME_OFFSET + USERNAME_SIZE)
+
+#define ROW_SIZE (ID_SIZE + USERNAME_SIZE + EMAIL_SIZE)
+```
+- This will probably work as intended. No way to confirm since I haven't completed the functionality yet.
+
 ## 📚 References  
-- ["Build Your Own X"](https://github.com/danistefanovic/build-your-own-x) 
+- ["Build Your Own X"](https://github.com/danistefanovic/build-your-own-x)
+- [Tutorial](https://github.com/cstack/db_tutorial) 
 - [SQLite Internals](https://www.sqlite.org/index.html)
 - [Understand how B-Trees work](https://www.youtube.com/watch?v=K1a2Bk8NrYQ)
 
