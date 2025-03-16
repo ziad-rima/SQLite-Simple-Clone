@@ -171,6 +171,17 @@ Halt               # Stop execution
         int sscanf(const char *buffer, const char *format, argument-list);
     ```
     - [SOURCE](https://www.ibm.com/docs/en/i/7.3?topic=functions-sscanf-read-data)
+
+- `memcpy()`: copies a block of memory from one location to another. It doesn't care about data types—it just moves bytes. 
+    format:
+    ```c
+        void *memcpy(void * __restrict__dest, const void * __restrict__src, size_t count);
+    ```
+    - copies the count bytes from the object pointed to by `src` to the object pointed to by `dest`.
+    - `count` is the number of bytes to copy.
+    - `memcpy()` returns a `void*` pointer to `dest`.
+    - [SOURCE](https://www.ibm.com/docs/en/zos/2.4.0?topic=functions-memcpy-copy-buffer)
+
 ##### Enum (Enumerations) 
 - An enum is a data type that represents a group of constants, with unchangeable values. 
 - Syntax:
@@ -513,6 +524,7 @@ int main(int argc, char* argv[]) {
 ```c
 #define COLUMN_USERNAME_SIZE 32
 #define COLUMN_EMAIL_SIZE 255
+typedef unsigned __int32 uint32_t;
 typedef struct {
     uint32_t id;
     char username[COLUMN_USERNAME_SIZE];
@@ -629,6 +641,139 @@ const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 #define ROW_SIZE (ID_SIZE + USERNAME_SIZE + EMAIL_SIZE)
 ```
 - This will probably work as intended. No way to confirm since I haven't completed the functionality yet.
+
+- Next, we should have a function that serializes and deserializes the rows. For that, I'm using `memcpy()` function, which takes in a destination pointer, and a source pointer, in addition to the number of bytes to copy. 
+- So, the function that serializes the row is built like this:
+```c
+void serialize_row(Row* source, void* destination) {
+    memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
+    memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE);
+    memcpy(destination + EMAIL_OFFSET, &(source->email), EMAIL_SIZE);
+}
+```
+- `destination + ID_OFFSET` moves the pointer to the correct location in the compact buffer. 
+
+- The function that deserializes the row:
+```c
+void deserialize(void* source, Row* destination) {
+    memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
+    memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
+    memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
+}
+```
+- Just like before, `source + ID_OFFSET` moves the pointer to the correct location in the compact buffer.
+
+- Offsets are needed because `source` is a _pointer_ to the start of the _entire row in raw memory_. Each field (id, username, email) was stored at a _specific position_ inside this block. When deserializing, we need to retrieve each field from the _same positions_, which requires adding offsets.
+
+- Next, we need a table structure because we're moving beyond just storing a single row. 
+- This table will contain:
+    - An array of pointers to pages (each page can hold multiple rows).
+    - The number of rows inserted. 
+
+```c
+const uint32_t PAGE_SIZE = 4096;
+#define TABLE_MAX_PAGES 100
+const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
+const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
+
+typedef struct {
+    uint32_t num_rows;
+    void* pages[TABLE_MAX_PAGES];
+} Table;
+``` 
+
+- Why did we use `void*` pointers? 
+    - Each entry in `pages` points to a block of memory (a page) that we allocate dynamically.
+    - Each page can hold multiple rows.
+
+- Next, we need a function that tells us where exactly in memory should we insert the row. By taking into account the row number (or the index of the row in the table) and the number of rows per page, we can calculate which page inside the table and at what position within it should this row be inserted. 
+```c
+void* row_slot(Table* table, uint32_t row_num) {
+    uint32_t page_num = row_num / ROWS_PER_PAGE;
+    void* page = table->pages[page_num];
+    if (page == NULL) {
+        page = table->pages[page_num] = malloc(PAGE_SIZE);
+    }
+    uint32_t row_offset = row_num % ROWS_PER_PAGE;
+    uint32_t byte_offset = row_offset * ROW_SIZE;
+    return page + byte_offset;
+}
+```
+- `page_num` determines what page in the table we should insert the row into.
+- Then, we check if the page exists before we write into it.
+- We allocate memory for the page if it's not already allocated.
+- `row_offset` gives us the row's position inside the page in row units.
+- `byte_offset` gives us the row's position inside the page in bytes. 
+
+- Next thing, I'm going to change the `execute_statement()` to read/write from our table structure, by writing a function for both the insertion and the selection.
+```c
+typedef enum {
+    EXECUTE_SUCCESS,
+    EXECUTE_TABLE_FULL
+} ExecuteResult;
+...
+ExecuteResult execute_insert(Statement* statement, Table* table) {
+    if (table->num_rows >= TABLE_MAX_ROWS) {
+        return EXECUTE_TABLE_FULL;
+    }
+    Row* row = &(statement->row_to_insert);
+    serialize_row(row, row_slot(table, table->num_rows));
+    table->num_rows += 1;
+    return EXECUTE_SUCCESS;
+}
+```
+- `serialize_row()` takes a `Row*` (structured data) and converts it into a raw byte format. Then, it stores that raw byte data at the correct memory location computed by `row_slot()`.
+
+```c
+ExecuteResult execute_select(Statement* statement, Table* table) {
+    Row row; 
+    for (uint32_t i = 0; i < table->num_rows; i++) {
+        deserialize_row(row_slot(table, i), &row);
+        print_row(&row);
+    }
+    return EXECUTE_SUCCESS;
+}
+```
+- `print_row()` is a simple function:
+```c
+void print_row(Row* row) {
+    printf("(%d %s %s)\n", row->id, row->username, row->email);
+}
+```
+- I changed `execute_command()` function to work with the new functions:
+```c
+void execute_command(Statement* statement, Table* table) {
+    switch (statement->type) {
+        case (STATEMENT_INSERT):
+            return execute_insert(statement, table);
+        case (STATEMENT_SELECT):
+            return execute_select(statement, table);
+    }
+} 
+```
+
+- Next, we need to build a function that initializes and frees a table:
+```c
+Table* new_table() {
+    Table* table = (Table*)malloc(sizeof(Table));
+    table->num_rows = 0;
+    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
+        table->pages[i] = NULL;
+    }
+    return table;
+}
+```
+```c
+void free_table(Table* table) {
+    for (int i = 0; table->pages[i]; i++) {
+        free(table->pages[i]);
+    }
+    free(table);
+}
+```
+
+- Now, our program enables us to store and retrieve data in a database.
+
 
 ## 📚 References  
 - ["Build Your Own X"](https://github.com/danistefanovic/build-your-own-x)
