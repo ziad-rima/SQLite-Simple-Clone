@@ -182,6 +182,18 @@ Halt               # Stop execution
     - `memcpy()` returns a `void*` pointer to `dest`.
     - [SOURCE](https://www.ibm.com/docs/en/zos/2.4.0?topic=functions-memcpy-copy-buffer)
 
+- `strtok()`: 
+    format:
+    ```c
+        char *strtok(char * __restrict__string1, const char * __restrict__string2);
+    ```
+    - Breaks a character string, pointed to by `string1`, into a sequence of tokens. The tokens are separated from one another by the characters in the string pointed to by `string2`. 
+    - [SOURCE](https://www.ibm.com/docs/en/zos/2.4.0?topic=functions-strtok-tokenize-string)
+
+- `atoi()`: converts a string of characters to an integer value.
+    -[SOURCE](https://www.scaler.com/topics/atoi-function-in-c/)
+
+
 ##### Enum (Enumerations) 
 - An enum is a data type that represents a group of constants, with unchangeable values. 
 - Syntax:
@@ -773,6 +785,64 @@ void free_table(Table* table) {
 ```
 
 - Now, our program enables us to store and retrieve data in a database.
+
+- In the `Row` struct definition, we allocated 32 bytes for username and 255 bytes for email, but C strings are supposed to end with a null character "`\0`", so I changed the definition to include it:
+```c
+typedef struct {
+    uint32_t id;
+    char username[COLUMN_USERNAME_SIZE + 1];  
+    char email[COLUMN_EMAIL_SIZE + 1];    
+} Row;
+```
+
+- We also have another problem related to user input, we used `sscanf()` to read inputs, but this function doesn't care about the buffer's length, meaning users can enter strings larger than 32 bytes or 255 bytes, the additional bytes will cause a buffer overflow, and it'll start writing into unexpected places in memory. 
+- To solve this problem, we can create a function `prepare_insert()` that:
+    - Splits the input into tokens using `strtok()` function.
+    - Checks every token in terms of size and availability (is a parameter(input) missing?).
+    - It also checks whether the id is a positive integer.
+    - Safely copies the inputs into `statement->row_to_insert` using `strcpy()` function.
+
+```c
+PrepareResult prepare_insert(InputBuffer* input_buffer, Statement* statement) {
+    statement->type = STATEMENT_INSERT;
+
+    char* keyword = strtok(input_buffer->buffer, " ");
+    char* id_string = strtok(NULL, " ");
+    char* username = strtok(NULL, " ");
+    char* email = strtok(NULL, " ");
+
+    if (id_string == NULL || username == NULL || email == NULL) {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    int id = atoi(id_string);
+    if (id < 0) {
+        return PREPARE_NEGATIVE_ID;
+    }
+
+    if (strlen(username) > COLUMN_USERNAME_SIZE) {
+        return PREPARE_STRING_TOO_LONG;
+    }
+    if (strlen(email) > COLUMN_EMAIL_SIZE) {
+        return PREPARE_STRING_TOO_LONG;    
+    }
+    statement->row_to_insert.id = id; 
+    strcpy(statement->row_to_insert.username, username);
+    strcpy(statement->row_to_insert.email, email);
+
+    return PREPARE_SUCCESS;
+}
+```
+- I also modified `prepare_statement()` accordingly:
+```c
+PrepareResult prepare_statement(InputBuffer* input_buffer, Statement* statement) {
+    if (strncmp(input_buffer->buffer, "insert", 6) == 0) {
+        return prepare_insert(input_buffer, statement);
+    }
+    ...
+}
+```
+
 
 
 ## 📚 References  
